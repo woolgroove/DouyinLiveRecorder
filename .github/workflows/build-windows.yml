@@ -1,0 +1,67 @@
+name: 构建 Windows 可执行文件
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 打包模式 (onefile=单个exe, standalone=文件夹含exe)
+        required: true
+        default: "onefile"
+        type: choice
+        options: ["onefile", "standalone"]
+      console-mode:
+        description: 控制台窗口 (force=显示, disable=隐藏)
+        required: true
+        default: "force"
+        type: choice
+        options: ["force", "disable"]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 构建可执行文件
+        uses: Nuitka/Nuitka-Action@main
+        with:
+          nuitka-version: main
+          script-name: main.py
+          mode: ${{ github.event.inputs.mode || 'onefile' }}
+          enable-plugins: |
+            data-files
+          include-data-dir: |
+            ./config=config
+            ./src/javascript=src/javascript
+          output-file: DouyinLiveRecorder
+          product-name: DouyinLiveRecorder
+          file-description: 多平台直播录制工具
+          file-version: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          company-name: ihmily
+          windows-console-mode: ${{ github.event.inputs.console-mode || 'force' }}
+          assume-yes-for-downloads: true
+
+      - name: 上传构建成果
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouyinLiveRecorder-Windows
+          path: |
+            build/*.exe
+            build/*.dist/**/*
+          include-hidden-files: true
