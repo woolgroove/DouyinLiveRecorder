@@ -562,6 +562,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             record_finished = False
             run_once = False
             start_pushed = False
+            offline_since = None
             new_record_url = ''
             count_time = time.time()
             retry = 0
@@ -1102,8 +1103,27 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         daemon=True
                                     ).start()
                                 start_pushed = False
+                                # 监控超时机制: 主播下线超过阈值时间后执行脚本并退出监控
+                                if record_finished:
+                                    if offline_since is None:
+                                        offline_since = time.time()
+                                    elif time.time() - offline_since > monitor_timeout:
+                                        logger.info(f"[{record_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
+                                        if custom_script:
+                                            script_cmd = custom_script.strip()
+                                            script_params = [
+                                                f'"{record_name.split(" ", maxsplit=1)[-1]}"',
+                                                f'"N/A"',
+                                                "N/A",
+                                                f'split_video_by_time:{split_video_by_time}',
+                                                f'converts_to_mp4:{converts_to_mp4}'
+                                            ]
+                                            run_script(script_cmd + ' ' + ' '.join(script_params))
+                                        clear_record_info(record_name, record_url)
+                                        return
 
                         else:
+                            offline_since = None  # 恢复直播，重置下线计时
                             content = f"\r{record_name} 正在直播中..."
                             print(content)
 
@@ -1843,6 +1863,7 @@ while True:
     create_time_file = options.get(read_config_value(config, '录制设置', '生成时间字幕文件', "否"), False)
     is_run_script = options.get(read_config_value(config, '录制设置', '是否录制完成后执行自定义脚本', "否"), False)
     custom_script = read_config_value(config, '录制设置', '自定义脚本执行命令', "") if is_run_script else None
+    monitor_timeout = int(read_config_value(config, '录制设置', '直播监控超时时间(秒)', 1800))
     enable_proxy_platform = read_config_value(
         config, '录制设置', '使用代理录制的平台(逗号分隔)',
         'tiktok, soop, pandalive, winktv, flextv, popkontv, twitch, liveme, showroom, chzzk, shopee, shp, youtu, faceit'
