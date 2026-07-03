@@ -52,7 +52,7 @@ jobs:
           output-file: DouyinLiveRecorder
           product-name: DouyinLiveRecorder
           file-description: 多平台直播录制工具
-          file-version: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+          file-version: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0' }}
           company-name: ihmily
           windows-console-mode: ${{ github.event.inputs.console-mode || 'force' }}
           assume-yes-for-downloads: true
