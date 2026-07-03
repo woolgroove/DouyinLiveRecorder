@@ -1796,8 +1796,12 @@ while True:
 
     try:
         if not os.path.isfile(config_file):
-            with open(config_file, 'w', encoding=text_encoding) as file:
-                pass
+            config_example = f'{script_path}/config/config.example.ini'
+            if os.path.isfile(config_example):
+                shutil.copy(config_example, config_file)
+            else:
+                # 如果 example 也不存在，保持向前兼容：创建空文件
+                open(config_file, 'w', encoding=text_encoding).close()
 
         ini_URL_content = ''
         if os.path.isfile(url_config_file):
