@@ -8,7 +8,7 @@ on:
       mode:
         description: 打包模式 (onefile=单个exe, standalone=文件夹含exe)
         required: true
-        default: "onefile"
+        default: "standalone"
         type: choice
         options: ["onefile", "standalone"]
       console-mode:
@@ -42,7 +42,7 @@ jobs:
         with:
           nuitka-version: main
           script-name: main.py
-          mode: ${{ github.event.inputs.mode || 'onefile' }}
+          mode: ${{ github.event.inputs.mode || 'standalone' }}
           enable-plugins: |
             data-files
           include-data-dir: |
@@ -61,6 +61,6 @@ jobs:
         with:
           name: DouyinLiveRecorder-Windows
           path: |
+            build/*.dist/**
             build/*.exe
-            build/*.dist/**/*
           include-hidden-files: true

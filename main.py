@@ -556,13 +556,14 @@ def select_source_url(link, stream_info):
 
 def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
+    offline_since = None
+    has_recorded = False
 
     while True:
         try:
             record_finished = False
             run_once = False
             start_pushed = False
-            offline_since = None
             new_record_url = ''
             count_time = time.time()
             retry = 0
@@ -570,7 +571,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             record_quality = get_quality_code(record_quality_zh)
             proxy_address = proxy_addr
             platform = '未知平台'
-            live_domain = '/'.join(record_url.split('/')[0:3])
 
             if proxy_addr:
                 proxy_address = None
@@ -1103,24 +1103,25 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                         daemon=True
                                     ).start()
                                 start_pushed = False
-                                # 监控超时机制: 主播下线超过阈值时间后执行脚本并退出监控
-                                if record_finished:
-                                    if offline_since is None:
-                                        offline_since = time.time()
-                                    elif time.time() - offline_since > monitor_timeout:
-                                        logger.info(f"[{record_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
-                                        if custom_script:
-                                            script_cmd = custom_script.strip()
-                                            script_params = [
-                                                f'"{record_name.split(" ", maxsplit=1)[-1]}"',
-                                                f'"N/A"',
-                                                "N/A",
-                                                f'split_video_by_time:{split_video_by_time}',
-                                                f'converts_to_mp4:{converts_to_mp4}'
-                                            ]
-                                            run_script(script_cmd + ' ' + ' '.join(script_params))
-                                        clear_record_info(record_name, record_url)
-                                        return
+
+                            # 监控超时机制: 曾录制过的主播下线超过阈值时间后执行脚本并退出监控
+                            if has_recorded:
+                                if offline_since is None:
+                                    offline_since = time.time()
+                                elif time.time() - offline_since > monitor_timeout:
+                                    logger.info(f"[{record_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
+                                    if custom_script:
+                                        script_cmd = custom_script.strip()
+                                        script_params = [
+                                            f'"{record_name.split(" ", maxsplit=1)[-1]}"',
+                                            '"N/A"',
+                                            "N/A",
+                                            f'split_video_by_time:{split_video_by_time}',
+                                            f'converts_to_mp4:{converts_to_mp4}'
+                                        ]
+                                        run_script(script_cmd + ' ' + ' '.join(script_params))
+                                    clear_record_info(record_name, record_url)
+                                    return
 
                         else:
                             offline_since = None  # 恢复直播，重置下线计时
@@ -1149,6 +1150,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                             real_url = select_source_url(record_url, port_info)
                             full_path = f'{default_path}/{platform}'
                             if real_url:
+                                has_recorded = True  # 标记已开始录制,供下线超时机制判断
                                 now = datetime.datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
                                 live_title = port_info.get('title')
                                 title_in_name = ''
