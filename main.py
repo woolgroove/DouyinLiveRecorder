@@ -237,7 +237,7 @@ def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> No
                     "ffmpeg", "-i", converts_file_path,
                     "-c:v", "libx264",
                     "-preset", "veryfast",
-                    "-crf", "23",
+                    "-crf", "25",
                     "-vf", "format=yuv420p",
                     "-c:a", "copy",
                     "-f", "mp4", converts_file_path.rsplit('.', maxsplit=1)[0] + ".mp4",
