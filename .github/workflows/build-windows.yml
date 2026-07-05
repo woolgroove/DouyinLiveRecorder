@@ -37,6 +37,17 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      - name: 解析版本号
+        id: version
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $ver = "${{ github.ref_name }}" -replace '^v', ''
+            echo "file_version=$ver" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "file_version=0.0.0.0" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
       - name: 构建可执行文件
         uses: Nuitka/Nuitka-Action@main
         with:
@@ -51,7 +62,7 @@ jobs:
           output-file: DouyinLiveRecorder
           product-name: DouyinLiveRecorder
           file-description: 多平台直播录制工具
-          file-version: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0' }}
+          file-version: ${{ steps.version.outputs.file_version }}
           company-name: ihmily
           windows-console-mode: ${{ github.event.inputs.console-mode || 'force' }}
           assume-yes-for-downloads: true
