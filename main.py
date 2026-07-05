@@ -224,8 +224,8 @@ def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> No
                 ffmpeg_command = [
                     "ffmpeg", "-i", converts_file_path,
                     "-c:v", "libx265",
-                    "-preset", "veryfast",
-                    "-crf", "28",
+                    "-preset", "medium",
+                    "-crf", "30",
                     "-vf", "format=yuv420p",
                     "-tag:v", "hvc1",
                     "-c:a", "copy",
