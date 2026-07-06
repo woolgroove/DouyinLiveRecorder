@@ -1717,6 +1717,7 @@ def backup_file_start() -> None:
 
 
 def check_ffmpeg_existence() -> bool:
+    ffmpeg_exists = False
     try:
         result = subprocess.run(['ffmpeg', '-version'], check=True, capture_output=True, text=True)
         if result.returncode == 0:
@@ -1732,8 +1733,8 @@ def check_ffmpeg_existence() -> bool:
     finally:
         if check_ffmpeg():
             time.sleep(1)
-            return True
-    return False
+            ffmpeg_exists = True
+    return ffmpeg_exists
 
 
 # --------------------------初始化程序-------------------------------------
