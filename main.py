@@ -19,6 +19,7 @@ import time
 import datetime
 import re
 import shutil
+import shlex
 import random
 import uuid
 from pathlib import Path
@@ -223,23 +224,14 @@ def converts_mp4(converts_file_path: str, is_original_delete: bool = True) -> No
                 color_obj.print_colored("正在转码为MP4格式并重新编码为h265\n", color_obj.YELLOW)
                 ffmpeg_command = [
                     "ffmpeg", "-i", converts_file_path,
-                    "-c:v", "libx265",
-                    "-preset", "medium",
-                    "-crf", "30",
-                    "-vf", "format=yuv420p",
-                    "-tag:v", "hvc1",
-                    "-c:a", "copy",
+                    *h265_transcode_params,
                     "-f", "mp4", converts_file_path.rsplit('.', maxsplit=1)[0] + ".mp4",
                 ]
             elif converts_to_h264:
                 color_obj.print_colored("正在转码为MP4格式并重新编码为h264\n", color_obj.YELLOW)
                 ffmpeg_command = [
                     "ffmpeg", "-i", converts_file_path,
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "25",
-                    "-vf", "format=yuv420p",
-                    "-c:a", "copy",
+                    *h264_transcode_params,
                     "-f", "mp4", converts_file_path.rsplit('.', maxsplit=1)[0] + ".mp4",
                 ]
             else:
@@ -1785,6 +1777,11 @@ def read_config_value(config_parser: configparser.RawConfigParser, section: str,
         return default_value
 
 
+def get_transcode_params(params: Any, default_params: str) -> list[str]:
+    params = str(params).strip() if params is not None else ""
+    return shlex.split(params or default_params)
+
+
 options = {"是": True, "否": False}
 config = configparser.RawConfigParser()
 language = read_config_value(config, '录制设置', 'language(zh_cn/en)', "zh_cn")
@@ -1861,6 +1858,20 @@ while True:
     converts_to_mp4 = options.get(read_config_value(config, '录制设置', '录制完成后自动转为mp4格式', "否"), False)
     converts_to_h264 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h264', "否"), False)
     converts_to_h265 = options.get(read_config_value(config, '录制设置', 'mp4格式重新编码为h265', "否"), False)
+    h264_transcode_params = get_transcode_params(
+        read_config_value(
+            config, '录制设置', 'h264转码参数',
+            "-c:v libx264 -preset veryfast -crf 25 -vf format=yuv420p -c:a copy"
+        ),
+        "-c:v libx264 -preset veryfast -crf 25 -vf format=yuv420p -c:a copy"
+    )
+    h265_transcode_params = get_transcode_params(
+        read_config_value(
+            config, '录制设置', 'h265转码参数',
+            "-c:v libx265 -preset medium -crf 30 -vf format=yuv420p -tag:v hvc1 -c:a copy"
+        ),
+        "-c:v libx265 -preset medium -crf 30 -vf format=yuv420p -tag:v hvc1 -c:a copy"
+    )
     delete_origin_file = options.get(read_config_value(config, '录制设置', '追加格式后删除原文件', "否"), False)
     create_time_file = options.get(read_config_value(config, '录制设置', '生成时间字幕文件', "否"), False)
     is_run_script = options.get(read_config_value(config, '录制设置', '是否录制完成后执行自定义脚本', "否"), False)
