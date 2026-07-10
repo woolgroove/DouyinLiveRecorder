@@ -550,6 +550,30 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
     offline_since = None
     has_recorded = False
+    record_name = f'序号{count_variable}'
+
+    def check_offline_timeout(rec_name: str) -> bool:
+        """主播处于下线状态时推进计时,曾录制过且下线超时则执行脚本并返回 True(应退出监控)"""
+        nonlocal offline_since
+        if not has_recorded:
+            return False
+        if offline_since is None:
+            offline_since = time.time()
+        elif time.time() - offline_since > monitor_timeout:
+            logger.info(f"[{rec_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
+            if custom_script:
+                script_cmd = custom_script.strip()
+                script_params = [
+                    f'"{rec_name.split(" ", maxsplit=1)[-1]}"',
+                    '"N/A"',
+                    "N/A",
+                    f'split_video_by_time:{split_video_by_time}',
+                    f'converts_to_mp4:{converts_to_mp4}'
+                ]
+                run_script(script_cmd + ' ' + ' '.join(script_params))
+            clear_record_info(rec_name, record_url)
+            return True
+        return False
 
     while True:
         try:
@@ -1059,6 +1083,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         with max_request_lock:
                             error_count += 1
                             error_window.append(1)
+                        # 主播彻底下播后接口常返回空名,此分支同样推进下线计时,避免计时永不启动
+                        if check_offline_timeout(record_name):
+                            return
                     else:
                         anchor_name = clean_name(anchor_name)
                         record_name = f'序号{count_variable} {anchor_name}'
@@ -1097,23 +1124,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 start_pushed = False
 
                             # 监控超时机制: 曾录制过的主播下线超过阈值时间后执行脚本并退出监控
-                            if has_recorded:
-                                if offline_since is None:
-                                    offline_since = time.time()
-                                elif time.time() - offline_since > monitor_timeout:
-                                    logger.info(f"[{record_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
-                                    if custom_script:
-                                        script_cmd = custom_script.strip()
-                                        script_params = [
-                                            f'"{record_name.split(" ", maxsplit=1)[-1]}"',
-                                            '"N/A"',
-                                            "N/A",
-                                            f'split_video_by_time:{split_video_by_time}',
-                                            f'converts_to_mp4:{converts_to_mp4}'
-                                        ]
-                                        run_script(script_cmd + ' ' + ' '.join(script_params))
-                                    clear_record_info(record_name, record_url)
-                                    return
+                            if check_offline_timeout(record_name):
+                                return
 
                         else:
                             offline_since = None  # 恢复直播，重置下线计时
