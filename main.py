@@ -30,6 +30,7 @@ import configparser
 import httpx
 from src import spider, stream
 from src.proxy import ProxyDetector
+from src.script_utils import build_script_command, has_recording_output
 from src.utils import logger
 from src import utils
 from msg_push import (
@@ -357,24 +358,35 @@ def push_message(record_name: str, live_url: str, content: str) -> None:
                 color_obj.print_colored(f"直播消息推送到{platform}失败: {e}", color_obj.RED)
 
 
-def run_script(command: str) -> None:
+def run_script(command: str) -> bool:
     try:
         process = subprocess.Popen(
-            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=get_startup_info(os_type)
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors='replace',
+            startupinfo=get_startup_info(os_type)
         )
         stdout, stderr = process.communicate()
-        stdout_decoded = stdout.decode('utf-8')
-        stderr_decoded = stderr.decode('utf-8')
-        if stdout_decoded.strip():
-            print(stdout_decoded)
-        if stderr_decoded.strip():
-            print(stderr_decoded)
+        if stdout.strip():
+            print(stdout)
+        if stderr.strip():
+            print(stderr)
+        if process.returncode != 0:
+            logger.error(f'脚本执行失败,返回码: {process.returncode}')
+            return False
+        return True
     except PermissionError as e:
         logger.error(e)
         logger.error('脚本无执行权限!, 若是Linux环境, 请先执行:chmod +x your_script.sh 授予脚本可执行权限')
     except OSError as e:
         logger.error(e)
         logger.error('Please add `#!/bin/bash` at the beginning of your bash script file.')
+    except Exception as e:
+        logger.error(f'脚本执行异常: {e}')
+    return False
 
 
 def clear_record_info(record_name: str, record_url: str) -> None:
@@ -422,7 +434,8 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
 
 
 def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
-                     script_command: str | None = None) -> bool:
+                     script_command: str | None = None,
+                     script_executed: threading.Event | None = None) -> bool:
     save_file_path = ffmpeg_command[-1]
     process = subprocess.Popen(
         ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
@@ -454,39 +467,60 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
 
     return_code = process.returncode
     stop_time = time.strftime('%Y-%m-%d %H:%M:%S')
-    if return_code == 0:
+    # 主播断流时 ffmpeg 常非 0 退出;只要已有录制文件,仍视为完成并继续转码/脚本
+    finished_ok = return_code == 0 or has_recording_output(
+        save_file_path, split_video_by_time, utils.get_file_paths
+    )
+    if finished_ok:
+        conversion_threads = []
         if converts_to_mp4 and save_type == 'TS':
             if split_video_by_time:
                 file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
                 prefix = os.path.basename(save_file_path).rsplit('_', maxsplit=1)[0]
                 for path in file_paths:
                     if prefix in path:
-                        threading.Thread(target=converts_mp4, args=(path, delete_origin_file)).start()
+                        thread = threading.Thread(target=converts_mp4, args=(path, delete_origin_file))
+                        thread.start()
+                        conversion_threads.append(thread)
             else:
-                threading.Thread(target=converts_mp4, args=(save_file_path, delete_origin_file)).start()
-        print(f"\n{record_name} {stop_time} 直播录制完成\n")
+                thread = threading.Thread(target=converts_mp4, args=(save_file_path, delete_origin_file))
+                thread.start()
+                conversion_threads.append(thread)
+
+        for thread in conversion_threads:
+            thread.join()
+
+        if return_code == 0:
+            print(f"\n{record_name} {stop_time} 直播录制完成\n")
+        else:
+            color_obj.print_colored(
+                f"\n{record_name} {stop_time} 直播流结束(返回码: {return_code}),已有录制文件,继续转码/脚本\n",
+                color_obj.YELLOW
+            )
 
         if script_command:
             logger.debug("开始执行脚本命令!")
-            if "python" in script_command:
-                params = [
-                    f'--record_name "{record_name}"',
-                    f'--save_file_path "{save_file_path}"',
-                    f'--save_type {save_type}',
-                    f'--split_video_by_time {split_video_by_time}',
-                    f'--converts_to_mp4 {converts_to_mp4}',
-                ]
+            python_params = [
+                f'--record_name "{record_name}"',
+                f'--save_file_path "{save_file_path}"',
+                f'--save_type {save_type}',
+                f'--split_video_by_time {split_video_by_time}',
+                f'--converts_to_mp4 {converts_to_mp4}',
+            ]
+            positional_params = [
+                f'"{record_name.split(" ", maxsplit=1)[-1]}"',
+                f'"{save_file_path}"',
+                save_type,
+                f'split_video_by_time:{split_video_by_time}',
+                f'converts_to_mp4:{converts_to_mp4}'
+            ]
+            command = build_script_command(script_command, python_params, positional_params)
+            if run_script(command):
+                if script_executed:
+                    script_executed.set()
+                logger.debug("脚本命令执行成功!")
             else:
-                params = [
-                    f'"{record_name.split(" ", maxsplit=1)[-1]}"',
-                    f'"{save_file_path}"',
-                    save_type,
-                    f'split_video_by_time:{split_video_by_time}',
-                    f'converts_to_mp4:{converts_to_mp4}'
-                ]
-            script_command = script_command.strip() + ' ' + ' '.join(params)
-            run_script(script_command)
-            logger.debug("脚本命令执行结束!")
+                logger.error("录制完成后的自定义脚本执行失败")
 
     else:
         color_obj.print_colored(f"\n{record_name} {stop_time} 直播录制出错,返回码: {return_code}\n", color_obj.RED)
@@ -550,6 +584,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
     global error_count
     offline_since = None
     has_recorded = False
+    script_executed = threading.Event()
     record_name = f'序号{count_variable}'
 
     def check_offline_timeout(rec_name: str) -> bool:
@@ -560,17 +595,28 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
         if offline_since is None:
             offline_since = time.time()
         elif time.time() - offline_since > monitor_timeout:
-            logger.info(f"[{rec_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
-            if custom_script:
-                script_cmd = custom_script.strip()
-                script_params = [
+            if custom_script and not script_executed.is_set():
+                logger.info(f"[{rec_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
+                python_params = [
+                    f'--record_name "{rec_name}"',
+                    '--save_file_path "N/A"',
+                    '--save_type N/A',
+                    f'--split_video_by_time {split_video_by_time}',
+                    f'--converts_to_mp4 {converts_to_mp4}',
+                ]
+                positional_params = [
                     f'"{rec_name.split(" ", maxsplit=1)[-1]}"',
                     '"N/A"',
                     "N/A",
                     f'split_video_by_time:{split_video_by_time}',
                     f'converts_to_mp4:{converts_to_mp4}'
                 ]
-                run_script(script_cmd + ' ' + ' '.join(script_params))
+                command = build_script_command(custom_script, python_params, positional_params)
+                if not run_script(command):
+                    logger.error(f"[{rec_name}] 自定义脚本执行失败,继续监控并在超时后重试")
+                    offline_since = time.time()
+                    return False
+                script_executed.set()
             clear_record_info(rec_name, record_url)
             return True
         return False
@@ -1068,6 +1114,10 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                         logger.error(f'{record_url} {platform}直播地址')
                         return
 
+                    # spider 失败时可能返回 list/空对象,统一成 dict 避免后续 KeyError 跳过下线计时
+                    if not isinstance(port_info, dict):
+                        port_info = {}
+
                     if anchor_name:
                         if '主播:' in anchor_name:
                             anchor_split: list = anchor_name.split('主播:')
@@ -1128,7 +1178,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                 return
 
                         else:
-                            offline_since = None  # 恢复直播，重置下线计时
                             content = f"\r{record_name} 正在直播中..."
                             print(content)
 
@@ -1154,7 +1203,9 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                             real_url = select_source_url(record_url, port_info)
                             full_path = f'{default_path}/{platform}'
                             if real_url:
+                                offline_since = None  # 真正拿到流地址才重置下线计时,避免假在线清零
                                 has_recorded = True  # 标记已开始录制,供下线超时机制判断
+                                script_executed.clear()
                                 now = datetime.datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
                                 live_title = port_info.get('title')
                                 title_in_name = ''
@@ -1332,7 +1383,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            script_executed
                                         )
                                         if comment_end:
                                             return
@@ -1373,6 +1425,26 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_finished = True
                                                 print(
                                                     f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制完成\n")
+                                                if custom_script and not script_executed.is_set():
+                                                    python_params = [
+                                                        f'--record_name "{record_name}"',
+                                                        f'--save_file_path "{save_file_path}"',
+                                                        f'--save_type {record_save_type}',
+                                                        f'--split_video_by_time {split_video_by_time}',
+                                                        f'--converts_to_mp4 {converts_to_mp4}',
+                                                    ]
+                                                    positional_params = [
+                                                        f'"{record_name.split(" ", maxsplit=1)[-1]}"',
+                                                        f'"{save_file_path}"',
+                                                        record_save_type,
+                                                        f'split_video_by_time:{split_video_by_time}',
+                                                        f'converts_to_mp4:{converts_to_mp4}'
+                                                    ]
+                                                    command = build_script_command(
+                                                        custom_script, python_params, positional_params
+                                                    )
+                                                    if run_script(command):
+                                                        script_executed.set()
 
                                             recording.discard(record_name)
                                         else:
@@ -1424,7 +1496,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            script_executed
                                         )
                                         if comment_end:
                                             return
@@ -1498,7 +1571,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            script_executed
                                         )
                                         if comment_end:
                                             return
@@ -1545,7 +1619,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             record_url,
                                             ffmpeg_command,
                                             record_save_type,
-                                            custom_script
+                                            custom_script,
+                                            script_executed
                                         )
                                         if comment_end:
                                             return
@@ -1581,7 +1656,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                script_executed
                                             )
                                             if comment_end:
                                                 if converts_to_mp4:
@@ -1625,7 +1701,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 record_url,
                                                 ffmpeg_command,
                                                 record_save_type,
-                                                custom_script
+                                                custom_script,
+                                                script_executed
                                             )
                                             if comment_end:
                                                 threading.Thread(
@@ -1640,12 +1717,19 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 error_window.append(1)
 
                                 count_time = time.time()
+                            elif has_recorded:
+                                # 接口假在线但拿不到流地址: 继续推进下线计时,避免永远清零/永远不到超时
+                                if check_offline_timeout(record_name):
+                                    return
 
                 except Exception as e:
                     logger.error(f"错误信息: {e} 发生错误的行数: {e.__traceback__.tb_lineno}")
                     with max_request_lock:
                         error_count += 1
                         error_window.append(1)
+                    # API 抛异常时同样推进下线计时,避免因异常循环跳过超时
+                    if check_offline_timeout(record_name):
+                        return
 
                 num = random.randint(-5, 5) + delay_default
                 if num < 0:
@@ -1680,6 +1764,8 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
             with max_request_lock:
                 error_count += 1
                 error_window.append(1)
+            if check_offline_timeout(record_name):
+                return
             time.sleep(2)
 
 
