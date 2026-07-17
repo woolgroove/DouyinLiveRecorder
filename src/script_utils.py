@@ -35,6 +35,23 @@ def has_recording_output(
     return os.path.isfile(save_file_path) and os.path.getsize(save_file_path) > 0
 
 
+def is_offline_timeout_reached(offline_since: float | None, monitor_timeout: int, now: float) -> bool:
+    return offline_since is not None and now - offline_since >= monitor_timeout
+
+
+def get_offline_wait_seconds(
+    poll_interval: int,
+    monitor_timeout: int,
+    offline_since: float | None,
+    now: float,
+) -> int:
+    """下线计时进行中时,将轮询等待限制在剩余超时时间内。"""
+    if offline_since is None:
+        return max(0, poll_interval)
+    remaining = max(0, monitor_timeout - (now - offline_since))
+    return min(max(0, poll_interval), int(remaining + 0.999))
+
+
 def build_script_command(command: str, python_params: list[str], positional_params: list[str]) -> str:
     command = command.strip()
     try:

@@ -30,7 +30,12 @@ import configparser
 import httpx
 from src import spider, stream
 from src.proxy import ProxyDetector
-from src.script_utils import build_script_command, has_recording_output
+from src.script_utils import (
+    build_script_command,
+    get_offline_wait_seconds,
+    has_recording_output,
+    is_offline_timeout_reached,
+)
 from src.utils import logger
 from src import utils
 from msg_push import (
@@ -118,7 +123,10 @@ def display_info() -> None:
                 if monitoring == 0:
                     print("\r没有正在监测和录制的直播")
                 else:
-                    print(f"\r没有正在录制的直播 循环监测间隔时间：{delay_default}秒")
+                    print(
+                        f"\r没有正在录制的直播 普通循环间隔：{delay_default}秒 | "
+                        f"录制结束后脚本超时：{monitor_timeout}秒"
+                    )
             else:
                 now_time = datetime.datetime.now()
                 print("x" * 60)
@@ -389,13 +397,18 @@ def run_script(command: str) -> bool:
     return False
 
 
-def clear_record_info(record_name: str, record_url: str) -> None:
+def clear_record_info(record_name: str, record_url: str, stop_monitoring: bool = False) -> None:
     global monitoring
     recording.discard(record_name)
-    if record_url in url_comments and record_url in running_list:
+    should_remove = record_url in running_list and (record_url in url_comments or stop_monitoring)
+    if should_remove:
         running_list.remove(record_url)
-        monitoring -= 1
-        color_obj.print_colored(f"[{record_name}]已经从录制列表中移除\n", color_obj.YELLOW)
+        monitoring = len(running_list)
+        if stop_monitoring:
+            not_record_list.append(record_url)
+            color_obj.print_colored(f"[{record_name}]自定义脚本执行成功,已停止本轮监控\n", color_obj.YELLOW)
+        else:
+            color_obj.print_colored(f"[{record_name}]已经从录制列表中移除\n", color_obj.YELLOW)
 
 
 def direct_download_stream(source_url: str, save_path: str, record_name: str, live_url: str, platform: str) -> bool:
@@ -433,9 +446,7 @@ def direct_download_stream(source_url: str, save_path: str, record_name: str, li
         return False
 
 
-def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str,
-                     script_command: str | None = None,
-                     script_executed: threading.Event | None = None) -> bool:
+def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, save_type: str) -> tuple[bool, bool]:
     save_file_path = ffmpeg_command[-1]
     process = subprocess.Popen(
         ffmpeg_command, stdin=subprocess.PIPE, stderr=subprocess.STDOUT, startupinfo=get_startup_info(os_type)
@@ -462,7 +473,7 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
             else:
                 process.send_signal(signal.SIGINT)
             process.wait()
-            return True
+            return True, False
         time.sleep(1)
 
     return_code = process.returncode
@@ -494,39 +505,15 @@ def check_subprocess(record_name: str, record_url: str, ffmpeg_command: list, sa
             print(f"\n{record_name} {stop_time} 直播录制完成\n")
         else:
             color_obj.print_colored(
-                f"\n{record_name} {stop_time} 直播流结束(返回码: {return_code}),已有录制文件,继续转码/脚本\n",
+                f"\n{record_name} {stop_time} 直播流结束(返回码: {return_code}),已有录制文件,继续转码\n",
                 color_obj.YELLOW
             )
-
-        if script_command:
-            logger.debug("开始执行脚本命令!")
-            python_params = [
-                f'--record_name "{record_name}"',
-                f'--save_file_path "{save_file_path}"',
-                f'--save_type {save_type}',
-                f'--split_video_by_time {split_video_by_time}',
-                f'--converts_to_mp4 {converts_to_mp4}',
-            ]
-            positional_params = [
-                f'"{record_name.split(" ", maxsplit=1)[-1]}"',
-                f'"{save_file_path}"',
-                save_type,
-                f'split_video_by_time:{split_video_by_time}',
-                f'converts_to_mp4:{converts_to_mp4}'
-            ]
-            command = build_script_command(script_command, python_params, positional_params)
-            if run_script(command):
-                if script_executed:
-                    script_executed.set()
-                logger.debug("脚本命令执行成功!")
-            else:
-                logger.error("录制完成后的自定义脚本执行失败")
 
     else:
         color_obj.print_colored(f"\n{record_name} {stop_time} 直播录制出错,返回码: {return_code}\n", color_obj.RED)
 
     recording.discard(record_name)
-    return False
+    return False, finished_ok
 
 
 def clean_name(input_text):
@@ -587,14 +574,20 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
     script_executed = threading.Event()
     record_name = f'序号{count_variable}'
 
+    def begin_offline_monitoring(rec_name: str) -> None:
+        nonlocal offline_since
+        if has_recorded and offline_since is None:
+            offline_since = time.time()
+            logger.info(f"[{rec_name}] 已进入下线监控,将在{monitor_timeout}秒后执行自定义脚本")
+
     def check_offline_timeout(rec_name: str) -> bool:
         """主播处于下线状态时推进计时,曾录制过且下线超时则执行脚本并返回 True(应退出监控)"""
         nonlocal offline_since
         if not has_recorded:
             return False
-        if offline_since is None:
-            offline_since = time.time()
-        elif time.time() - offline_since > monitor_timeout:
+        begin_offline_monitoring(rec_name)
+        elapsed = time.time() - offline_since
+        if elapsed >= monitor_timeout:
             if custom_script and not script_executed.is_set():
                 logger.info(f"[{rec_name}] 下线超过{monitor_timeout}秒,执行脚本并退出监控")
                 python_params = [
@@ -617,7 +610,7 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                     offline_since = time.time()
                     return False
                 script_executed.set()
-            clear_record_info(rec_name, record_url)
+            clear_record_info(rec_name, record_url, stop_monitoring=True)
             return True
         return False
 
@@ -1203,9 +1196,6 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                             real_url = select_source_url(record_url, port_info)
                             full_path = f'{default_path}/{platform}'
                             if real_url:
-                                offline_since = None  # 真正拿到流地址才重置下线计时,避免假在线清零
-                                has_recorded = True  # 标记已开始录制,供下线超时机制判断
-                                script_executed.clear()
                                 now = datetime.datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
                                 live_title = port_info.get('title')
                                 title_in_name = ''
@@ -1378,14 +1368,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                                 ]
 
                                         ffmpeg_command.extend(command)
-                                        comment_end = check_subprocess(
+                                        comment_end, recorded_output = check_subprocess(
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            record_save_type,
-                                            custom_script,
-                                            script_executed
+                                            record_save_type
                                         )
+                                        if recorded_output:
+                                            has_recorded = True
+                                            script_executed.clear()
+                                            offline_since = None
+                                        begin_offline_monitoring(record_name)
                                         if comment_end:
                                             return
 
@@ -1423,28 +1416,12 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
 
                                             if download_success:
                                                 record_finished = True
+                                                has_recorded = True
+                                                script_executed.clear()
                                                 print(
                                                     f"\n{anchor_name} {time.strftime('%Y-%m-%d %H:%M:%S')} 直播录制完成\n")
-                                                if custom_script and not script_executed.is_set():
-                                                    python_params = [
-                                                        f'--record_name "{record_name}"',
-                                                        f'--save_file_path "{save_file_path}"',
-                                                        f'--save_type {record_save_type}',
-                                                        f'--split_video_by_time {split_video_by_time}',
-                                                        f'--converts_to_mp4 {converts_to_mp4}',
-                                                    ]
-                                                    positional_params = [
-                                                        f'"{record_name.split(" ", maxsplit=1)[-1]}"',
-                                                        f'"{save_file_path}"',
-                                                        record_save_type,
-                                                        f'split_video_by_time:{split_video_by_time}',
-                                                        f'converts_to_mp4:{converts_to_mp4}'
-                                                    ]
-                                                    command = build_script_command(
-                                                        custom_script, python_params, positional_params
-                                                    )
-                                                    if run_script(command):
-                                                        script_executed.set()
+                                                offline_since = None
+                                                begin_offline_monitoring(record_name)
 
                                             recording.discard(record_name)
                                         else:
@@ -1491,14 +1468,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             ]
                                         ffmpeg_command.extend(command)
 
-                                        comment_end = check_subprocess(
+                                        comment_end, recorded_output = check_subprocess(
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            record_save_type,
-                                            custom_script,
-                                            script_executed
+                                            record_save_type
                                         )
+                                        if recorded_output:
+                                            has_recorded = True
+                                            script_executed.clear()
+                                            offline_since = None
+                                        begin_offline_monitoring(record_name)
                                         if comment_end:
                                             return
 
@@ -1566,14 +1546,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             ]
                                         ffmpeg_command.extend(command)
 
-                                        comment_end = check_subprocess(
+                                        comment_end, recorded_output = check_subprocess(
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            record_save_type,
-                                            custom_script,
-                                            script_executed
+                                            record_save_type
                                         )
+                                        if recorded_output:
+                                            has_recorded = True
+                                            script_executed.clear()
+                                            offline_since = None
+                                        begin_offline_monitoring(record_name)
                                         if comment_end:
                                             return
 
@@ -1614,14 +1597,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             ]
 
                                         ffmpeg_command.extend(command)
-                                        comment_end = check_subprocess(
+                                        comment_end, recorded_output = check_subprocess(
                                             record_name,
                                             record_url,
                                             ffmpeg_command,
-                                            record_save_type,
-                                            custom_script,
-                                            script_executed
+                                            record_save_type
                                         )
+                                        if recorded_output:
+                                            has_recorded = True
+                                            script_executed.clear()
+                                            offline_since = None
+                                        begin_offline_monitoring(record_name)
                                         if comment_end:
                                             return
 
@@ -1651,14 +1637,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             ]
 
                                             ffmpeg_command.extend(command)
-                                            comment_end = check_subprocess(
+                                            comment_end, recorded_output = check_subprocess(
                                                 record_name,
                                                 record_url,
                                                 ffmpeg_command,
-                                                record_save_type,
-                                                custom_script,
-                                                script_executed
+                                                record_save_type
                                             )
+                                            if recorded_output:
+                                                has_recorded = True
+                                                script_executed.clear()
+                                                offline_since = None
+                                            begin_offline_monitoring(record_name)
                                             if comment_end:
                                                 if converts_to_mp4:
                                                     file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
@@ -1696,14 +1685,17 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                                             ]
 
                                             ffmpeg_command.extend(command)
-                                            comment_end = check_subprocess(
+                                            comment_end, recorded_output = check_subprocess(
                                                 record_name,
                                                 record_url,
                                                 ffmpeg_command,
-                                                record_save_type,
-                                                custom_script,
-                                                script_executed
+                                                record_save_type
                                             )
+                                            if recorded_output:
+                                                has_recorded = True
+                                                script_executed.clear()
+                                                offline_since = None
+                                            begin_offline_monitoring(record_name)
                                             if comment_end:
                                                 threading.Thread(
                                                     target=converts_mp4, args=(save_file_path, delete_origin_file)
@@ -1734,29 +1726,40 @@ def start_record(url_data: tuple, count_variable: int = -1) -> None:
                 num = random.randint(-5, 5) + delay_default
                 if num < 0:
                     num = 0
-                x = num
 
                 if error_count > 20:
-                    x = x + 60
+                    num += 60
                     color_obj.print_colored("\r瞬时错误太多,延迟加60秒", color_obj.YELLOW)
 
                 # 这里是.如果录制结束后,循环时间会暂时变成30s后检测一遍. 这样一定程度上防止主播卡顿造成少录
                 # 当30秒过后检测一遍后. 会回归正常设置的循环秒数
                 if record_finished:
                     count_time_end = time.time() - count_time
-                    if count_time_end < 60:
-                        x = 30
+                    x = 30 if count_time_end < 60 else num
                     record_finished = False
-
                 else:
                     x = num
 
-                # 这里是正常循环
+                # 下线超时是最终上限,不能再被普通轮询或错误退避覆盖
+                x = get_offline_wait_seconds(
+                    x,
+                    monitor_timeout,
+                    offline_since,
+                    time.time()
+                )
+
+                # 这里是正常循环；下线超时只看本地时钟,不依赖下一次平台请求返回
                 while x:
+                    if is_offline_timeout_reached(offline_since, monitor_timeout, time.time()):
+                        if check_offline_timeout(record_name):
+                            return
                     x = x - 1
                     if loop_time:
                         print(f'\r{anchor_name}循环等待{x}秒 ', end="")
                     time.sleep(1)
+                if is_offline_timeout_reached(offline_since, monitor_timeout, time.time()):
+                    if check_offline_timeout(record_name):
+                        return
                 if loop_time:
                     print('\r检测直播间中...', end="")
         except Exception as e:

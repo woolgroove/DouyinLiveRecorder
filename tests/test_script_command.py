@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.script_utils import build_script_command, has_recording_output
+from src.script_utils import (
+    build_script_command,
+    get_offline_wait_seconds,
+    has_recording_output,
+    is_offline_timeout_reached,
+)
 
 
 class BuildScriptCommandTests(unittest.TestCase):
@@ -62,6 +67,58 @@ class BuildScriptCommandTests(unittest.TestCase):
         self.assertEqual(
             command,
             '"C:\\Scripts\\notify.py" --record_name "主播"',
+        )
+
+
+class OfflineWaitTests(unittest.TestCase):
+    def test_offline_timeout_shorter_than_poll_interval_is_not_delayed(self):
+        self.assertEqual(
+            get_offline_wait_seconds(
+                poll_interval=120,
+                monitor_timeout=60,
+                offline_since=100.0,
+                now=100.0,
+            ),
+            60,
+        )
+
+    def test_offline_wait_uses_remaining_timeout(self):
+        self.assertEqual(
+            get_offline_wait_seconds(
+                poll_interval=120,
+                monitor_timeout=60,
+                offline_since=100.0,
+                now=145.2,
+            ),
+            15,
+        )
+
+    def test_online_monitoring_keeps_normal_poll_interval(self):
+        self.assertEqual(
+            get_offline_wait_seconds(
+                poll_interval=120,
+                monitor_timeout=60,
+                offline_since=None,
+                now=100.0,
+            ),
+            120,
+        )
+
+
+class OfflineTimeoutReachedTests(unittest.TestCase):
+    def test_not_reached_before_deadline(self):
+        self.assertFalse(
+            is_offline_timeout_reached(offline_since=100.0, monitor_timeout=60, now=159.0)
+        )
+
+    def test_reached_at_deadline(self):
+        self.assertTrue(
+            is_offline_timeout_reached(offline_since=100.0, monitor_timeout=60, now=160.0)
+        )
+
+    def test_not_started_returns_false(self):
+        self.assertFalse(
+            is_offline_timeout_reached(offline_since=None, monitor_timeout=60, now=999.0)
         )
 
 
